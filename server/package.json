@@ -1,0 +1,24 @@
+{
+  "name": "@imagegen/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "hono": "^4.12.25",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@imagegen/shared": "workspace:*",
+    "@types/node": "^25.9.3",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
