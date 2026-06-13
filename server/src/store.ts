@@ -14,6 +14,8 @@ function isImageMeta(value: unknown): value is ImageMeta {
   const v = value as Record<string, unknown>;
   return (
     typeof v.id === 'string' &&
+    // Require a UUID-shaped id so imagePath()/metaPath() never throw on list().
+    ID_PATTERN.test(v.id) &&
     typeof v.prompt === 'string' &&
     typeof v.createdAt === 'string' &&
     typeof v.durationMs === 'number'
@@ -36,13 +38,23 @@ export class ImageStore {
    * is removed last so a failed meta write does not lose the artifact.
    */
   async save(meta: ImageMeta, sourcePngPath: string): Promise<void> {
-    await fs.promises.copyFile(sourcePngPath, this.imagePath(meta.id));
-    await fs.promises.writeFile(
-      this.metaPath(meta.id),
-      JSON.stringify(meta, null, 2),
-      'utf8',
-    );
-    await fs.promises.rm(sourcePngPath, { force: true });
+    try {
+      await fs.promises.copyFile(sourcePngPath, this.imagePath(meta.id));
+      try {
+        await fs.promises.writeFile(
+          this.metaPath(meta.id),
+          JSON.stringify(meta, null, 2),
+          'utf8',
+        );
+      } catch (err) {
+        // Meta write failed: drop the orphan dest PNG so no JSON-less image lingers.
+        await fs.promises.rm(this.imagePath(meta.id), { force: true }).catch(() => {});
+        throw err;
+      }
+    } finally {
+      // Always consume the source tmp file, even on a partial failure above.
+      await fs.promises.rm(sourcePngPath, { force: true });
+    }
   }
 
   async list(limit?: number): Promise<ImageMeta[]> {

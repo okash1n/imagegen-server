@@ -46,25 +46,42 @@ function validateRefImagePaths(paths: string[]): string | undefined {
   return undefined;
 }
 
-/** Resolves when the job reaches a terminal state (succeeded/failed). */
-function waitForJob(queue: JobQueue, jobId: string): Promise<Job> {
-  return new Promise((resolve) => {
+/**
+ * Resolves when the job reaches a terminal state (succeeded/failed), or rejects
+ * if the optional signal aborts first (e.g. the MCP client disconnected). The
+ * 'update' listener is always removed on settle so listeners cannot accumulate.
+ */
+function waitForJob(queue: JobQueue, jobId: string, signal?: AbortSignal): Promise<Job> {
+  return new Promise((resolve, reject) => {
     const current = queue.get(jobId);
     if (current !== undefined && (current.state === 'succeeded' || current.state === 'failed')) {
       resolve(current);
       return;
     }
+    if (signal?.aborted === true) {
+      reject(new Error('クライアントが切断されました'));
+      return;
+    }
     const onUpdate = (job: Job): void => {
       if (job.id === jobId && (job.state === 'succeeded' || job.state === 'failed')) {
-        queue.off('update', onUpdate);
+        cleanup();
         resolve(job);
       }
     };
+    const onAbort = (): void => {
+      cleanup();
+      reject(new Error('クライアントが切断されました'));
+    };
+    const cleanup = (): void => {
+      queue.off('update', onUpdate);
+      signal?.removeEventListener('abort', onAbort);
+    };
     queue.on('update', onUpdate);
+    signal?.addEventListener('abort', onAbort);
   });
 }
 
-function registerTools(server: McpServer, deps: McpDeps): void {
+function registerTools(server: McpServer, deps: McpDeps, signal?: AbortSignal): void {
   server.registerTool(
     'generate_image',
     {
@@ -95,7 +112,9 @@ function registerTools(server: McpServer, deps: McpDeps): void {
           kind === 'edit' ? { kind, prompt, refImagePaths } : { kind, prompt };
         jobs.push(deps.queue.submit(request));
       }
-      const finished = await Promise.all(jobs.map((job) => waitForJob(deps.queue, job.id)));
+      const finished = await Promise.all(
+        jobs.map((job) => waitForJob(deps.queue, job.id, signal)),
+      );
       const images: GeneratedImageEntry[] = [];
       const failed: FailedEntry[] = [];
       for (const job of finished) {
@@ -140,9 +159,9 @@ function registerTools(server: McpServer, deps: McpDeps): void {
   );
 }
 
-export function createMcpServer(deps: McpDeps): McpServer {
+export function createMcpServer(deps: McpDeps, signal?: AbortSignal): McpServer {
   const server = new McpServer({ name: 'imagegen-server', version: '0.1.0' });
-  registerTools(server, deps);
+  registerTools(server, deps, signal);
   return server;
 }
 
@@ -186,9 +205,13 @@ export function createMcpHandler(
       return;
     }
     // Stateless: a fresh server + transport per POST request.
-    const server = createMcpServer(deps);
+    // Abort in-flight waitForJob calls when the client disconnects, so the
+    // queue's 'update' listeners do not accumulate across slow requests.
+    const abortController = new AbortController();
+    const server = createMcpServer(deps, abortController.signal);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => {
+      abortController.abort();
       void transport.close();
       void server.close();
     });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -119,5 +119,39 @@ describe('ImageStore', () => {
     fs.writeFileSync(path.join(dir, `${randomUUID()}.json`), '{ this is not json');
 
     await expect(store.list()).resolves.toEqual([meta]);
+  });
+
+  it('list skips metas whose id is not UUID-shaped without throwing', async () => {
+    const tmp = makeTempDir();
+    const dir = path.join(tmp, 'images');
+    const store = new ImageStore(dir);
+    const valid = makeMeta();
+    await store.save(valid, writeSourcePng(tmp));
+    // Hand-placed meta with a non-UUID id: valid shape otherwise.
+    const bad = { ...makeMeta(), id: 'not-a-uuid' };
+    fs.writeFileSync(path.join(dir, 'not-a-uuid.json'), JSON.stringify(bad));
+
+    await expect(store.list()).resolves.toEqual([valid]);
+  });
+
+  it('save removes the source and leaves no orphan png when the meta write fails', async () => {
+    const tmp = makeTempDir();
+    const dir = path.join(tmp, 'images');
+    const store = new ImageStore(dir);
+    const meta = makeMeta();
+    const sourcePath = writeSourcePng(tmp);
+    const writeSpy = vi
+      .spyOn(fs.promises, 'writeFile')
+      .mockRejectedValueOnce(new Error('disk full'));
+
+    try {
+      await expect(store.save(meta, sourcePath)).rejects.toThrow('disk full');
+      // (a) the source tmp file is always consumed
+      expect(fs.existsSync(sourcePath)).toBe(false);
+      // (b) no orphan dest PNG remains when there is no accompanying JSON
+      expect(fs.existsSync(path.join(dir, `${meta.id}.png`))).toBe(false);
+    } finally {
+      writeSpy.mockRestore();
+    }
   });
 });
