@@ -161,6 +161,7 @@ describe('AppServerEngine', () => {
     if (typeof params !== 'object' || params === null) {
       throw new Error('turn/interrupt の params がオブジェクトではありません');
     }
+    expect(typeof (params as Record<string, unknown>)['threadId']).toBe('string');
     expect(typeof (params as Record<string, unknown>)['turnId']).toBe('string');
   }, 10_000);
 
@@ -176,5 +177,22 @@ describe('AppServerEngine', () => {
     const status = await engine.authStatus();
     expect(status.loggedIn).toBe(false);
     expect(status.message).toContain('codex login');
+  }, 10_000);
+
+  it('stop: アクティブな turn の最中に stop すると Promise が reject されプロセスもリークしない', async () => {
+    // slow シナリオは turn/start に応答後そのまま無音(turn/completed を送らない)。
+    // turn が in-flight の状態で stop() を呼び、generate() の Promise が reject されること、
+    // stop() が子プロセスの終了まで待って解決すること(リークしないこと)を検証する。
+    const { engine } = await createEngine('slow', { turnTimeoutMs: 8_000 });
+    const pending = engine.generate({ prompt: 'x' });
+    const settled = pending.then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+    // turn/start の往復が完了して turn が in-flight になるまで少し待つ。
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await engine.stop();
+    await expect(pending).rejects.toThrow();
+    expect(await settled).toBe('rejected');
   }, 10_000);
 });

@@ -65,6 +65,7 @@ export class AppServerEngine implements ImageEngine {
   private readonly threadHandlers = new Map<string, ThreadNotificationHandler>();
   private readonly inFlight = new Set<(err: Error) => void>();
   private consecutiveFailures = 0;
+  private stopped = false;
 
   constructor(private readonly opts: AppServerEngineOpts) {}
 
@@ -102,6 +103,7 @@ export class AppServerEngine implements ImageEngine {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     const child = this.child;
     const conn = this.conn;
     this.child = undefined;
@@ -132,6 +134,9 @@ export class AppServerEngine implements ImageEngine {
   }
 
   private async ensureConnection(): Promise<JsonRpcConnection> {
+    if (this.stopped) {
+      throw new Error('エンジンは停止済みです');
+    }
     if (this.conn) {
       return this.conn;
     }
@@ -148,6 +153,10 @@ export class AppServerEngine implements ImageEngine {
       const base = this.opts.restartBaseDelayMs ?? DEFAULT_RESTART_BASE_DELAY_MS;
       const delay = Math.min(base * 2 ** (this.consecutiveFailures - 1), MAX_RESTART_DELAY_MS);
       await sleep(delay);
+    }
+    // stop() may have run during the backoff sleep; do not resurrect the child.
+    if (this.stopped) {
+      throw new Error('エンジンは停止済みです');
     }
     // No cwd option: inherit the process cwd (tests rely on relative fake path).
     const child = spawn(this.opts.codexBin, this.opts.codexArgs ?? ['app-server'], {
@@ -184,6 +193,16 @@ export class AppServerEngine implements ImageEngine {
         child.kill('SIGKILL');
       }
       throw err instanceof Error ? err : new Error(String(err));
+    }
+    // stop() may have run while the handshake was in flight (spawn / initialize).
+    // Do not publish the connection; tear down the freshly-spawned child instead.
+    if (this.stopped) {
+      if (this.child === child) {
+        this.child = undefined;
+      }
+      conn.close('エンジンは停止済みです');
+      child.kill('SIGKILL');
+      throw new Error('エンジンは停止済みです');
     }
     // Publish the connection only after the handshake completed (initialize
     // response received and the "initialized" notification sent). Concurrent
@@ -327,6 +346,9 @@ export class AppServerEngine implements ImageEngine {
         }
         reject(new Error(`ターンが ${timeoutMs}ms 以内に完了しませんでした(タイムアウト)`));
       }, timeoutMs);
+      // Do not let the turn-timeout timer keep the event loop alive and block
+      // a graceful shutdown; the timer is always cleared in the finally below.
+      timer.unref();
     });
 
     try {
