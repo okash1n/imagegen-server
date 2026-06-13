@@ -232,6 +232,15 @@ describe('GET /api/images', () => {
     const res = await app.request('/api/images/NOT_A_UUID');
     expect(res.status).toBe(400);
   });
+
+  it('各アイテムにサーバー側絶対パス path を含める(GUI の再生成・コピー用)', async () => {
+    const meta = await seedImage('2026-06-13T03:00:00.000Z');
+    const res = await app.request('/api/images');
+    expect(res.status).toBe(200);
+    const items = (await res.json()) as Array<ImageMeta & { path: string }>;
+    const item = items.find((m) => m.id === meta.id);
+    expect(item?.path).toBe(store.imagePath(meta.id));
+  });
 });
 
 describe('POST /api/uploads', () => {

@@ -126,7 +126,10 @@ export function createApi(deps: ApiDeps): Hono {
       }
       limit = n;
     }
-    return c.json(await deps.store.list(limit));
+    // The GUI needs the server-side absolute file path ("re-generate from
+    // this image" / "copy path"). ImageMeta itself stays unchanged.
+    const metas = await deps.store.list(limit);
+    return c.json(metas.map((meta) => ({ ...meta, path: deps.store.imagePath(meta.id) })));
   });
 
   app.get('/api/images/:id', async (c) => {
