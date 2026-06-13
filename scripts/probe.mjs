@@ -293,8 +293,13 @@ function evaluateAndExit() {
     );
     ok = false;
   } else if (imageItem.status !== 'completed') {
-    report(`FAIL: imageGeneration の status が completed ではありません: ${JSON.stringify(imageItem.status)}`);
-    ok = false;
+    // Real codex (0.139.0) delivers the terminal imageGeneration item via the
+    // item/completed notification with status "generating" (not "completed").
+    // The item/completed method itself is the completion signal, so we log the
+    // status but do not fail on it; result/savedPath presence is the real gate.
+    report(
+      `注記: imageGeneration item/completed の status=${JSON.stringify(imageItem.status)}(item/completed が完了シグナルなので result/savedPath の有無で判定する)`,
+    );
   }
   if (turnResult?.status !== 'completed') {
     report(
