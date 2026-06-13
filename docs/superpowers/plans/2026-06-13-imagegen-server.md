@@ -63,7 +63,7 @@ Task 0(足場)
 - ターン中の通知: `turn/started` / `item/started` / `item/completed` / `turn/completed`(すべて params 直下に `threadId`)
 - **`turn/failed` は存在しない**。失敗は `turn/completed` の `turn.status === "failed"` + `turn.error.message` で判定
 - `turn/started`・`turn/completed` の `items` は常に空配列。アイテムは item/* 通知だけが正
-- imageGeneration アイテム完成形: `{"type":"imageGeneration","id":"...","status":"completed","revisedPrompt":"...","result":"<base64>","savedPath":"/.../codex/generated_images/..."}`。`savedPath` は省略されうる(null ではなくフィールドごと無い)→ 無ければ `result` をデコード
+- imageGeneration アイテム完成形: `{"type":"imageGeneration","id":"...","status":"generating","revisedPrompt":"...","result":"<base64>","savedPath":"/.../codex/generated_images/..."}`。**実機(codex 0.139.0)では item/completed の `status` は `"completed"` ではなく `"generating"` で来る**(item/completed という通知自体が完了シグナル。status 文字列で完了判定してはいけない)。`savedPath` は省略されうる(null ではなくフィールドごと無い)→ 無ければ `result` をデコード。完了判定は「imageGeneration の item/completed を受信 + result/savedPath が揃う + turn/completed の turn.status が completed」で行う
 - 認証確認: `getAuthStatus` → `{"authMethod":"chatgpt"|"apikey"|null,...}`。imagegen は ChatGPT サブスク認証(chatgpt 系)でのみ有効
 - サーバー→クライアントの request(承認要求等)が来たら一律 `-32601` でエラー応答(approvalPolicy "never" + read-only では本来発生しない)
 
@@ -649,8 +649,13 @@ function evaluateAndExit() {
     );
     ok = false;
   } else if (imageItem.status !== 'completed') {
-    report(`FAIL: imageGeneration の status が completed ではありません: ${JSON.stringify(imageItem.status)}`);
-    ok = false;
+    // Real codex (0.139.0) delivers the terminal imageGeneration item via the
+    // item/completed notification with status "generating" (not "completed").
+    // The item/completed method itself is the completion signal, so we log the
+    // status but do not fail on it; result/savedPath presence is the real gate.
+    report(
+      `注記: imageGeneration item/completed の status=${JSON.stringify(imageItem.status)}(item/completed が完了シグナルなので result/savedPath の有無で判定する)`,
+    );
   }
   if (turnResult?.status !== 'completed') {
     report(
@@ -2046,7 +2051,9 @@ describe('fake-appserver smoke', () => {
       throw new Error('imageGeneration の item/completed 通知が来ていません');
     }
     const item = itemCompleted.params.item;
-    expect(item.status).toBe('completed');
+    // Real codex emits the terminal imageGeneration item with status "generating";
+    // the fake matches that. item/completed (the method) is the completion signal.
+    expect(item.status).toBe('generating');
     const savedPath = item.savedPath;
     if (typeof savedPath !== 'string') {
       throw new Error('savedPath が文字列ではありません');
@@ -2200,7 +2207,10 @@ function emitHappyItems(threadId, turnId) {
       item: {
         type: 'imageGeneration',
         id: callId,
-        status: 'completed',
+        // Real codex (0.139.0) emits the terminal imageGeneration item via
+        // item/completed with status "generating" (not "completed"); match it
+        // so the engine is tested against real behavior.
+        status: 'generating',
         revisedPrompt: 'fake revised prompt',
         result: PNG_BASE64,
         savedPath: savedPngPath,
@@ -2332,7 +2342,7 @@ Test Files  1 passed (1)
      Tests  1 passed (1)
 ```
 
-PASS で確認できたこと: thread id が `thr_<連番>` 形/ `item/completed` の imageGeneration に実在する `savedPath` と非空 `result`(base64)が乗る / `turn/completed` の `turn.status === "completed"` / `FAKE_CAPTURE_FILE` に turn/start の受信行がそのまま記録される。
+PASS で確認できたこと: thread id が `thr_<連番>` 形/ `item/completed` の imageGeneration(status は実機同様 `generating`)に実在する `savedPath` と非空 `result`(base64)が乗る / `turn/completed` の `turn.status === "completed"` / `FAKE_CAPTURE_FILE` に turn/start の受信行がそのまま記録される。
 
 `no-tool` / `slow` / `crash-once` / `auth-expired` の各シナリオはここでは煙確認のみ(コード上の分岐)とし、実際の検証は Task 6 の AppServerEngine 統合テストがエンジン挙動と合わせて行う。
 
@@ -2861,7 +2871,12 @@ export class AppServerEngine implements ImageEngine {
           if (!isRecord(item)) {
             return;
           }
-          if (item['type'] === 'imageGeneration' && item['status'] === 'completed') {
+          // Completion is signalled by the item/completed method itself, not by
+          // the item's status string. Real codex (0.139.0) emits the terminal
+          // imageGeneration item with status "generating" (not "completed"),
+          // carrying the full result and savedPath. So accept any imageGeneration
+          // item/completed and let result/savedPath presence be the real gate.
+          if (item['type'] === 'imageGeneration') {
             image = {
               savedPath: typeof item['savedPath'] === 'string' ? item['savedPath'] : undefined,
               result: typeof item['result'] === 'string' ? item['result'] : undefined,
@@ -6797,7 +6812,7 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
   - thread/start → `thr_<連番>` で応答 + thread/started 通知
   - 環境変数 `FAKE_CAPTURE_FILE` が設定されていれば、**受信した全行をそのまま JSONL で追記**(テスト側が turn/start の instruction 内容や turn/interrupt 送信を検証するために使う)
   - 複数 thread の並行 turn を独立に処理できること(turn ごとに `setTimeout(FAKE_DELAY_MS // 既定 10ms)` で応答)
-- happy: turn/start 受信 → turn/started → item/started(imageGeneration, in_progress)→ item/completed(imageGeneration completed。savedPath = スクリプト起動時に os.tmpdir() に書いた実在 1x1 PNG のパス、result = 同 PNG の base64)→ turn/completed(status "completed")
+- happy: turn/start 受信 → turn/started → item/started(imageGeneration, in_progress)→ item/completed(imageGeneration。status は実機同様 `generating`。savedPath = スクリプト起動時に os.tmpdir() に書いた実在 1x1 PNG のパス、result = 同 PNG の base64)→ turn/completed(status "completed")
 - no-tool: turn/started → item/completed(agentMessage、text「画像生成はできません」)→ turn/completed(status "completed"。imageGeneration アイテム無し)
 - slow: turn/start に response だけ返し、その後何も送らない(タイムアウトテスト用)
 - crash-once: 環境変数 `FAKE_STATE_FILE` のファイルが**存在しなければ**作成してから thread/start 応答直後に process.exit(1)。**存在すれば** happy と同じ動作(=クラッシュ→自動再起動→成功、を 1 プロセスサイクルで検証できる)
@@ -6887,12 +6902,14 @@ input アイテムの variant(タグは camelCase、**フィールドは snake_c
 
 ### 5.5 imageGeneration アイテム(ThreadItem。フィールドは camelCase)
 
-item/completed に乗る完成形:
+item/completed に乗る完成形(実機 codex 0.139.0 で確認):
 ```json
-{"type":"imageGeneration","id":"call_abc","status":"completed","revisedPrompt":"a watercolor cat","result":"<base64 PNG 文字列>","savedPath":"/Users/x/.codex/generated_images/<session>/<call>.png"}
+{"type":"imageGeneration","id":"ig_...","status":"generating","revisedPrompt":"a watercolor cat","result":"<base64 PNG 文字列>","savedPath":"/Users/x/.codex/generated_images/<session>/<call>.png"}
 ```
+- **`status` は `"completed"` ではなく `"generating"` で来る(実機検証済み)**。item/completed という通知自体が完了シグナルなので、**status 文字列で完了判定してはいけない**。imageGeneration の item/completed を受信したら(result/savedPath が揃っていれば)完了とみなす
 - `savedPath` はディスク書き込み成功時のみ存在(失敗時は **null ではなくフィールドごと省略**)→ optional として扱い、無ければ `result` の base64 をデコードして使う
 - item/started 時は `{"type":"imageGeneration","id":"...","status":"in_progress","revisedPrompt":null,"result":""}`(savedPath なし)
+- `id` は `ig_<hex>` 形式、thread.id は UUID 形式。どちらもサーバーの保存には使わない(保存は job.id を使う)
 - agentMessage アイテム(no-tool 失敗時のテキスト回収に使う): `{"type":"agentMessage","id":"...","text":"..."}` を想定するが、**フィールド名は防御的に扱う**(`typeof item.text === 'string'` でなければ JSON.stringify(item) をエラーメッセージに使う)
 
 ### 5.6 認証確認

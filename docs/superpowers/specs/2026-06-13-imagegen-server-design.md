@@ -169,7 +169,20 @@ imagegen-server/
 
 ## 9. 未検証の前提とリスク
 
-実装着手前または最初の実装ステップで実機検証が必要:
+> **実機ゲート結果(2026-06-13、codex-cli 0.139.0、plan: pro)**: probe で生成・編集の 2 回を実行し、いずれも PASS。下記 1・2 は検証済み、3 は opt-in 不要と判明。実装上の補正点は §9.1 を参照。
+
+### 9.1 実機検証で判明した補正点(実装に必ず反映する)
+
+- **imageGeneration の `status` は item/completed でも `"completed"` ではなく `"generating"`** で来る(result・savedPath は揃う)。完了判定は item の status 文字列ではなく「imageGeneration の item/completed 受信 + result/savedPath が揃う + turn/completed の turn.status が completed」で行う
+- **enum は kebab-case**(`"approvalPolicy":"never"` / `"sandbox":"read-only"`)が実機で受理された(README の camelCase 表記は誤り)
+- **`experimentalApi` の opt-in は不要**。`initialize` は clientInfo のみで thread/start・turn/start・getAuthStatus が通った
+- **prompt 遵守は完全一致**(生成・編集とも `revisedPrompt` が入力 prompt と一致)。指示文テンプレートは現状で十分
+- **read-only sandbox から cwd 外の参照画像を読めた**(編集が成功)。§9-1 後半の前提は成立
+- **認証判定は `authMethod`(`chatgpt`)で行う**。`requiresOpenaiAuth` は chatgpt 認証でも `true` を返すため判定に使わない
+- **未知の通知が大量に来る**(`mcpServer/startupStatus/updated`、`deprecationNotice`、`thread/status/changed`、`thread/tokenUsage/updated`、`account/rateLimits/updated` 等)。未知メソッドは無視する設計で問題なし
+- **所要時間は 1 ターン約 40〜50 秒**(ユーザー環境では多数の MCP サーバー起動を待つため長め)。turn タイムアウト既定 180 秒は妥当。MCP サーバー起動は画像生成に不要なので、将来 thread 起動オプションで抑制できれば短縮余地あり(v1 では未対応)
+
+### 9.2 残るリスク(実装着手前または最初の実装ステップで確認)
 
 1. **ephemeral thread で imagegen 拡張が有効になるか。** 拡張の executor 選択は feature flag / モデルメタデータに依存するため、`thread/start` のパラメータ(モデル選択を含む)次第で imagegen ツールが出てこない可能性がある。あわせて、read-only sandbox の thread から `~/.imagegen-server` 配下の参照画像(`referenced_image_paths`)が読めることも確認する。最優先で検証する
 2. **「prompt をそのまま使え」指示の遵守率。** imagegen ツールの契約上、prompt はモデルが書く引数であり、書き換えの余地が残る。実機検証で指示文を固める。ごく僅かな逸脱は許容する(完全な決定性が必要なら将来の直叩きエンジンで対応)
